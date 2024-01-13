@@ -13,8 +13,6 @@ import numpy as np
 import cv2
 from PIL import Image, ImageOps
 from skimage import exposure
-from ldm.data.util import AddMiDaS
-from ldm.models.diffusion.ddpm import LatentDepth2ImageDiffusion
 from einops import repeat, rearrange
 from blendmodes.blend import blendLayers, BlendType
 from installer import git_commit
@@ -30,7 +28,6 @@ import modules.extra_networks
 import modules.face_restoration
 import modules.images as images
 import modules.styles
-import modules.sd_hijack
 import modules.sd_hijack_freeu
 import modules.sd_samplers
 import modules.sd_samplers_common
@@ -42,6 +39,9 @@ import modules.generation_parameters_copypaste
 from modules.sd_hijack_hypertile import context_hypertile_vae, context_hypertile_unet, hypertile_set
 
 
+if shared.backend == shared.Backend.ORIGINAL:
+    import modules.sd_hijack
+
 opt_C = 4
 opt_f = 8
 debug = shared.log.trace if os.environ.get('SD_PROCESS_DEBUG', None) is not None else lambda *args, **kwargs: None
@@ -49,19 +49,24 @@ debug('Trace: PROCESS')
 
 
 def setup_color_correction(image):
-    shared.log.debug("Calibrating color correction.")
+    debug("Calibrating color correction")
     correction_target = cv2.cvtColor(np.asarray(image.copy()), cv2.COLOR_RGB2LAB)
     return correction_target
 
 
 def apply_color_correction(correction, original_image):
-    shared.log.debug("Applying color correction.")
-    image = Image.fromarray(cv2.cvtColor(exposure.match_histograms(cv2.cvtColor(np.asarray(original_image), cv2.COLOR_RGB2LAB), correction, channel_axis=2), cv2.COLOR_LAB2RGB).astype("uint8"))
+    shared.log.debug(f"Applying color correction: correction={correction.shape} image={original_image}")
+    np_image = np.asarray(original_image)
+    np_recolor = cv2.cvtColor(np_image, cv2.COLOR_RGB2LAB)
+    np_match = exposure.match_histograms(np_recolor, correction, channel_axis=2)
+    np_output = cv2.cvtColor(np_match, cv2.COLOR_LAB2RGB)
+    image = Image.fromarray(np_output.astype("uint8"))
     image = blendLayers(image, original_image, BlendType.LUMINOSITY)
     return image
 
 
 def apply_overlay(image: Image, paste_loc, index, overlays):
+    debug(f'Apply overlay: image={image} loc={paste_loc} index={index} overlays={overlays}')
     if overlays is None or index >= len(overlays):
         return image
     overlay = overlays[index]
@@ -121,12 +126,14 @@ def txt2img_image_conditioning(sd_model, x, width, height):
 
 
 def get_sampler_name(sampler_index: int, img: bool = False) -> str:
-    samplers = modules.sd_samplers.samplers if not img else modules.sd_samplers.samplers_for_img2img
-    if len(samplers) > sampler_index:
-        sampler_name = samplers[sampler_index].name
+    if len(modules.sd_samplers.samplers) > sampler_index:
+        sampler_name = modules.sd_samplers.samplers[sampler_index].name
     else:
         sampler_name = "UniPC"
-        shared.log.warning(f'Sampler not found: index={sampler_index} available={[s.name for s in samplers]} fallback={sampler_name}')
+        shared.log.warning(f'Sampler not found: index={sampler_index} available={[s.name for s in modules.sd_samplers.samplers]} fallback={sampler_name}')
+    if img and sampler_name == "PLMS":
+        sampler_name = "UniPC"
+        shared.log.warning(f'Sampler not compatible: name=PLMS fallback={sampler_name}')
     return sampler_name
 
 
@@ -135,7 +142,7 @@ class StableDiffusionProcessing:
     """
     The first set of paramaters: sd_models -> do_not_reload_embeddings represent the minimum required to create a StableDiffusionProcessing
     """
-    def __init__(self, sd_model=None, outpath_samples=None, outpath_grids=None, prompt: str = "", styles: List[str] = None, seed: int = -1, subseed: int = -1, subseed_strength: float = 0, seed_resize_from_h: int = -1, seed_resize_from_w: int = -1, seed_enable_extras: bool = True, sampler_name: str = None, latent_sampler: str = None, batch_size: int = 1, n_iter: int = 1, steps: int = 50, cfg_scale: float = 7.0, image_cfg_scale: float = None, clip_skip: int = 1, width: int = 512, height: int = 512, full_quality: bool = True, restore_faces: bool = False, tiling: bool = False, do_not_save_samples: bool = False, do_not_save_grid: bool = False, extra_generation_params: Dict[Any, Any] = None, overlay_images: Any = None, negative_prompt: str = None, eta: float = None, do_not_reload_embeddings: bool = False, denoising_strength: float = 0, diffusers_guidance_rescale: float = 0.7, resize_mode: int = 0, resize_name: str = 'None', scale_by: float = 0, selected_scale_tab: int = 0, hdr_clamp: bool = False, hdr_boundary: float = 4.0, hdr_threshold: float = 3.5, hdr_center: bool = False, hdr_channel_shift: float = 0.8, hdr_full_shift: float = 0.8, hdr_maximize: bool = False, hdr_max_center: float = 0.6, hdr_max_boundry: float = 1.0, override_settings: Dict[str, Any] = None, override_settings_restore_afterwards: bool = True, sampler_index: int = None, script_args: list = None): # pylint: disable=unused-argument
+    def __init__(self, sd_model=None, outpath_samples=None, outpath_grids=None, prompt: str = "", styles: List[str] = None, seed: int = -1, subseed: int = -1, subseed_strength: float = 0, seed_resize_from_h: int = -1, seed_resize_from_w: int = -1, seed_enable_extras: bool = True, sampler_name: str = None, hr_sampler_name: str = None, batch_size: int = 1, n_iter: int = 1, steps: int = 50, cfg_scale: float = 7.0, image_cfg_scale: float = None, clip_skip: int = 1, width: int = 512, height: int = 512, full_quality: bool = True, restore_faces: bool = False, tiling: bool = False, do_not_save_samples: bool = False, do_not_save_grid: bool = False, extra_generation_params: Dict[Any, Any] = None, overlay_images: Any = None, negative_prompt: str = None, eta: float = None, do_not_reload_embeddings: bool = False, denoising_strength: float = 0, diffusers_guidance_rescale: float = 0.7, sag_scale: float = 0.0, resize_mode: int = 0, resize_name: str = 'None', scale_by: float = 0, selected_scale_tab: int = 0, hdr_clamp: bool = False, hdr_boundary: float = 4.0, hdr_threshold: float = 3.5, hdr_center: bool = False, hdr_channel_shift: float = 0.8, hdr_full_shift: float = 0.8, hdr_maximize: bool = False, hdr_max_center: float = 0.6, hdr_max_boundry: float = 1.0, override_settings: Dict[str, Any] = None, override_settings_restore_afterwards: bool = True, sampler_index: int = None, script_args: list = None): # pylint: disable=unused-argument
         self.outpath_samples: str = outpath_samples
         self.outpath_grids: str = outpath_grids
         self.prompt: str = prompt
@@ -148,7 +155,7 @@ class StableDiffusionProcessing:
         self.seed_resize_from_h: int = seed_resize_from_h
         self.seed_resize_from_w: int = seed_resize_from_w
         self.sampler_name: str = sampler_name
-        self.latent_sampler: str = latent_sampler
+        self.hr_sampler_name: str = hr_sampler_name
         self.batch_size: int = batch_size
         self.n_iter: int = n_iter
         self.steps: int = steps
@@ -157,6 +164,7 @@ class StableDiffusionProcessing:
         self.scale_by: float = scale_by
         self.image_cfg_scale = image_cfg_scale
         self.diffusers_guidance_rescale = diffusers_guidance_rescale
+        self.sag_scale = sag_scale
         if devices.backend == "ipex" and width == 1024 and height == 1024 and os.environ.get('DISABLE_IPEX_1024_WA', None) is None:
             width = 1080
             height = 1080
@@ -285,6 +293,7 @@ class StableDiffusionProcessing:
 
     def depth2img_image_conditioning(self, source_image):
         # Use the AddMiDaS helper to Format our source image to suit the MiDaS model
+        from ldm.data.util import AddMiDaS
         transformer = AddMiDaS(model_type="dpt_hybrid")
         transformed = transformer({"jpg": rearrange(source_image[0], "c h w -> h w c")})
         midas_in = torch.from_numpy(transformed["midas_in"][None, ...]).to(device=shared.device)
@@ -348,6 +357,7 @@ class StableDiffusionProcessing:
         return latent_image.new_zeros(latent_image.shape[0], 5, 1, 1)
 
     def img2img_image_conditioning(self, source_image, latent_image, image_mask=None):
+        from ldm.models.diffusion.ddpm import LatentDepth2ImageDiffusion
         source_image = devices.cond_cast_float(source_image)
         # HACK: Using introspection as the Depth2Image model doesn't appear to uniquely
         # identify itself with a field common to all models. The conditioning_key is also hybrid.
@@ -633,7 +643,7 @@ def create_infotext(p: StableDiffusionProcessing, all_prompts=None, all_seeds=No
         args["Hires resize"] = f"{p.hr_resize_x}x{p.hr_resize_y}"
         args["Hires size"] = f"{p.hr_upscale_to_x}x{p.hr_upscale_to_y}"
         args["Denoising strength"] = p.denoising_strength
-        args["Latent sampler"] = p.latent_sampler
+        args["Hires sampler"] = p.hr_sampler_name
         args["Image CFG scale"] = p.image_cfg_scale
         args["CFG rescale"] = p.diffusers_guidance_rescale
     if 'refine' in p.ops:
@@ -643,7 +653,7 @@ def create_infotext(p: StableDiffusionProcessing, all_prompts=None, all_seeds=No
         args['Refiner steps'] = p.refiner_steps
         args['Refiner start'] = p.refiner_start
         args["Hires steps"] = p.hr_second_pass_steps
-        args["Latent sampler"] = p.latent_sampler
+        args["Hires sampler"] = p.hr_sampler_name
         args["CFG rescale"] = p.diffusers_guidance_rescale
     if 'img2img' in p.ops or 'inpaint' in p.ops:
         args["Init image size"] = f"{getattr(p, 'init_img_width', 0)}x{getattr(p, 'init_img_height', 0)}"
@@ -1129,7 +1139,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         self.is_hr_pass = True
         hypertile_set(self, hr=True)
         shared.state.job_count = 2 * self.n_iter
-        shared.log.debug(f'Init hires: upscaler="{self.hr_upscaler}" sampler="{self.latent_sampler}" resize={self.hr_resize_x}x{self.hr_resize_y} upscale={self.hr_upscale_to_x}x{self.hr_upscale_to_y}')
+        shared.log.debug(f'Init hires: upscaler="{self.hr_upscaler}" sampler="{self.hr_sampler_name}" resize={self.hr_resize_x}x{self.hr_resize_y} upscale={self.hr_upscale_to_x}x{self.hr_upscale_to_y}')
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
 
@@ -1198,14 +1208,14 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                     image_conditioning = self.img2img_image_conditioning(decode_first_stage(self.sd_model, samples.to(dtype=devices.dtype_vae), self.full_quality), samples)
                 else:
                     image_conditioning = self.txt2img_image_conditioning(samples.to(dtype=devices.dtype_vae))
-                if self.latent_sampler == "PLMS":
-                    self.latent_sampler = 'UniPC'
+                if self.hr_sampler_name == "PLMS":
+                    self.hr_sampler_name = 'UniPC'
             if self.hr_force or latent_scale_mode is not None:
                 shared.state.job = 'hires'
                 if self.denoising_strength > 0:
                     self.ops.append('hires')
                     devices.torch_gc() # GC now before running the next img2img to prevent running out of memory
-                    self.sampler = modules.sd_samplers.create_sampler(self.latent_sampler or self.sampler_name, self.sd_model)
+                    self.sampler = modules.sd_samplers.create_sampler(self.hr_sampler_name or self.sampler_name, self.sd_model)
                     if hasattr(self.sampler, "initialize"):
                         self.sampler.initialize(self)
                     samples = samples[:, :, self.truncate_y//2:samples.shape[2]-(self.truncate_y+1)//2, self.truncate_x//2:samples.shape[3]-(self.truncate_x+1)//2]
@@ -1237,8 +1247,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.image_mask = mask
         self.latent_mask = None
         self.mask_for_overlay = None
-        self.mask_blur_x: int = 4
-        self.mask_blur_y: int = 4
+        self.mask_blur_x = mask_blur # a1111 compatibility item
+        self.mask_blur_y = mask_blur # a1111 compatibility item
         self.mask_blur = mask_blur
         self.inpainting_fill = inpainting_fill
         self.inpaint_full_res = inpaint_full_res
@@ -1259,16 +1269,6 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.scripts = None
         self.script_args = []
 
-    @property
-    def mask_blur(self):
-        mask_blur = max(self.mask_blur_x, self.mask_blur_y)
-        return mask_blur
-
-    @mask_blur.setter
-    def mask_blur(self, value):
-        self.mask_blur_x = value
-        self.mask_blur_y = value
-
     def init(self, all_prompts, all_seeds, all_subseeds):
         if shared.backend == shared.Backend.DIFFUSERS and self.image_mask is not None and not self.is_control:
             shared.sd_model = modules.sd_models.set_diffuser_pipe(self.sd_model, modules.sd_models.DiffusersTaskType.INPAINTING)
@@ -1287,47 +1287,40 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.ops.append('img2img')
         crop_region = None
 
-        image_mask = self.image_mask
-        if image_mask is not None:
-            if type(image_mask) == list:
-                image_mask = image_mask[0]
-            image_mask = create_binary_mask(image_mask)
+        if self.image_mask is not None:
+            if type(self.image_mask) == list:
+                self.image_mask = self.image_mask[0]
+            self.image_mask = create_binary_mask(self.image_mask)
             if self.inpainting_mask_invert:
-                image_mask = ImageOps.invert(image_mask)
-            if self.mask_blur_x > 0:
-                np_mask = np.array(image_mask)
-                kernel_size = 2 * int(2.5 * self.mask_blur_x + 0.5) + 1
-                np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), self.mask_blur_x)
-                image_mask = Image.fromarray(np_mask)
-            if self.mask_blur_y > 0:
-                np_mask = np.array(image_mask)
-                kernel_size = 2 * int(2.5 * self.mask_blur_y + 0.5) + 1
-                np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), self.mask_blur_y)
-                image_mask = Image.fromarray(np_mask)
+                self.image_mask = ImageOps.invert(self.image_mask)
+            if self.mask_blur > 0:
+                np_mask = np.array(self.image_mask)
+                kernel_size = 2 * int(2.5 * self.mask_blur + 0.5) + 1
+                np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), self.mask_blur)
+                np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), self.mask_blur)
+                self.image_mask = Image.fromarray(np_mask)
             if self.inpaint_full_res:
-                self.mask_for_overlay = image_mask
-                mask = image_mask.convert('L')
+                self.mask_for_overlay = self.image_mask
+                mask = self.image_mask.convert('L')
                 crop_region = modules.masking.get_crop_region(np.array(mask), self.inpaint_full_res_padding)
                 crop_region = modules.masking.expand_crop_region(crop_region, self.width, self.height, mask.width, mask.height)
                 x1, y1, x2, y2 = crop_region
-
                 mask = mask.crop(crop_region)
-                image_mask = images.resize_image(2, mask, self.width, self.height)
+                self.image_mask = images.resize_image(2, mask, self.width, self.height)
                 self.paste_to = (x1, y1, x2-x1, y2-y1)
             else:
-                image_mask = images.resize_image(self.resize_mode, image_mask, self.width, self.height)
-                np_mask = np.array(image_mask)
+                self.image_mask = images.resize_image(self.resize_mode, self.image_mask, self.width, self.height)
+                np_mask = np.array(self.image_mask)
                 np_mask = np.clip((np_mask.astype(np.float32)) * 2, 0, 255).astype(np.uint8)
                 self.mask_for_overlay = Image.fromarray(np_mask)
             self.overlay_images = []
 
-        latent_mask = self.latent_mask if self.latent_mask is not None else image_mask
+        latent_mask = self.latent_mask if self.latent_mask is not None else self.image_mask
 
         add_color_corrections = shared.opts.img2img_color_correction and self.color_corrections is None
         if add_color_corrections:
             self.color_corrections = []
-        imgs = []
-        unprocessed = []
+        processed = []
         if getattr(self, 'init_images', None) is None:
             return
         if not isinstance(self.init_images, list):
@@ -1347,7 +1340,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                     image = images.resize_image(self.resize_mode, image, self.width, self.height, self.resize_name)
                 self.width = image.width
                 self.height = image.height
-            if image_mask is not None:
+            if self.image_mask is not None:
                 try:
                     image_masked = Image.new('RGBa', (image.width, image.height))
                     image_to_paste = image.convert("RGBA").convert("RGBa")
@@ -1361,37 +1354,32 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 image = image.crop(crop_region)
                 if image.width != self.width or image.height != self.height:
                     image = images.resize_image(3, image, self.width, self.height, self.resize_name)
-            if image_mask is not None and self.inpainting_fill != 1:
+            if self.image_mask is not None and self.inpainting_fill != 1:
                 image = modules.masking.fill(image, latent_mask)
             if add_color_corrections:
                 self.color_corrections.append(setup_color_correction(image))
-            if shared.backend == shared.Backend.DIFFUSERS:
-                unprocessed.append(image) # assign early for diffusers
-            image = np.array(image).astype(np.float32) / 255.0
-            image = np.moveaxis(image, 2, 0)
-            imgs.append(image)
-        self.init_images = unprocessed if shared.backend == shared.Backend.DIFFUSERS else imgs
-        if len(imgs) == 1:
-            batch_images = np.expand_dims(imgs[0], axis=0).repeat(self.batch_size, axis=0)
-            if self.overlay_images is not None:
-                self.overlay_images = self.overlay_images * self.batch_size
-            if self.color_corrections is not None and len(self.color_corrections) == 1:
-                self.color_corrections = self.color_corrections * self.batch_size
-        elif len(imgs) <= self.batch_size:
-            self.batch_size = len(imgs)
-            batch_images = np.array(imgs)
-        else:
-            raise RuntimeError(f"Incorrect number of of images={len(imgs)} expected={self.batch_size} or less")
+            processed.append(image)
+        self.init_images = processed
+        self.batch_size = len(self.init_images)
+        if self.overlay_images is not None:
+            self.overlay_images = self.overlay_images * self.batch_size
+        if self.color_corrections is not None and len(self.color_corrections) == 1:
+            self.color_corrections = self.color_corrections * self.batch_size
         if shared.backend == shared.Backend.DIFFUSERS:
             return # we've already set self.init_images and self.mask and we dont need any more processing
 
+        self.init_images = [np.moveaxis((np.array(image).astype(np.float32) / 255.0), 2, 0) for image in self.init_images]
+        if len(self.init_images) == 1:
+            batch_images = np.expand_dims(self.init_images[0], axis=0).repeat(self.batch_size, axis=0)
+        elif len(self.init_images) <= self.batch_size:
+            batch_images = np.array(self.init_images)
         image = torch.from_numpy(batch_images)
         image = 2. * image - 1.
         image = image.to(device=shared.device, dtype=devices.dtype_vae)
         self.init_latent = self.sd_model.get_first_stage_encoding(self.sd_model.encode_first_stage(image))
         if self.resize_mode == 4:
             self.init_latent = torch.nn.functional.interpolate(self.init_latent, size=(self.height // 8, self.width // 8), mode="bilinear")
-        if image_mask is not None:
+        if self.image_mask is not None:
             init_mask = latent_mask
             latmask = init_mask.convert('RGB').resize((self.init_latent.shape[3], self.init_latent.shape[2]))
             latmask = np.moveaxis(np.array(latmask, dtype=np.float32), 2, 0) / 255
@@ -1404,7 +1392,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 self.init_latent = self.init_latent * self.mask + create_random_tensors(self.init_latent.shape[1:], all_seeds[0:self.init_latent.shape[0]]) * self.nmask
             elif self.inpainting_fill == 3:
                 self.init_latent = self.init_latent * self.mask
-        self.image_conditioning = self.img2img_image_conditioning(image, self.init_latent, image_mask)
+        self.image_conditioning = self.img2img_image_conditioning(image, self.init_latent, self.image_mask)
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         hypertile_set(self)

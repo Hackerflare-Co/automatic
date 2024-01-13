@@ -19,7 +19,7 @@ from modules.paths import sd_configs_path
 from modules.sd_models import CheckpointInfo
 from modules.processing import StableDiffusionProcessing
 from modules.olive import config
-from modules.onnx import DynamicSessionOptions, OnnxFakeModule, submodels_sd, submodels_sdxl, submodels_sdxl_refiner
+from modules.onnx import DynamicSessionOptions, OnnxFakeModule
 from modules.onnx_utils import extract_device, move_inference_session, check_diffusers_cache, check_pipeline_sdxl, check_cache_onnx, load_init_dict, load_submodel, load_submodels, patch_kwargs, load_pipeline, get_base_constructor
 from modules.onnx_ep import ExecutionProvider, EP_TO_NAME, get_provider
 
@@ -89,7 +89,7 @@ class OnnxRawPipeline(OnnxPipelineBase):
     original_filename: str
 
     constructor: Type[OnnxPipelineBase]
-    submodels: List[str]
+    submodels: List[str] = []
     init_dict: Dict[str, Tuple[str]] = {}
 
     scheduler: Any = None # for Img2Img
@@ -125,7 +125,6 @@ class OnnxRawPipeline(OnnxPipelineBase):
         self.is_refiner = self._is_sdxl and "Img2Img" not in constructor.__name__ and "Img2Img" in diffusers.DiffusionPipeline.load_config(path)["_class_name"]
         self.constructor = OnnxStableDiffusionXLImg2ImgPipeline if self.is_refiner else constructor
         self.model_type = self.constructor.__name__
-        self.submodels = (submodels_sdxl_refiner if self.is_refiner else submodels_sdxl) if self._is_sdxl else submodels_sd
 
     def derive_properties(self, pipeline: diffusers.DiffusionPipeline):
         pipeline.sd_model_hash = self.sd_model_hash
@@ -365,6 +364,19 @@ class OnnxRawPipeline(OnnxPipelineBase):
             return None
 
     def preprocess(self, p: StableDiffusionProcessing):
+        self.submodels = []
+
+        if "Text Encoder" in shared.opts.cuda_compile:
+            if not self.is_refiner:
+                self.submodels.append("text_encoder")
+            if self._is_sdxl:
+                self.submodels.append("text_encoder_2")
+        if "Model" in shared.opts.cuda_compile:
+            self.submodels.append("unet")
+        if "VAE" in shared.opts.cuda_compile:
+            self.submodels.append("vae_encoder")
+            self.submodels.append("vae_decoder")
+
         in_dir = self.path if os.path.isdir(self.path) else shared.opts.onnx_temp_dir
         disable_classifier_free_guidance = p.cfg_scale < 0.01
 

@@ -107,7 +107,7 @@ def get_cuda_device_string():
 def get_optimal_device_name():
     if cuda_ok or backend == 'directml':
         return get_cuda_device_string()
-    if has_mps():
+    if has_mps() and backend != 'openvino':
         return "mps"
     return "cpu"
 
@@ -181,7 +181,7 @@ def test_fp16():
     if shared.cmd_opts.experimental:
         return True
     try:
-        x = torch.tensor([[1.5,.0,.0,.0]]).to(device).half()
+        x = torch.tensor([[1.5,.0,.0,.0]]).to(device=device, dtype=torch.float16)
         layerNorm = torch.nn.LayerNorm(4, eps=0.00001, elementwise_affine=True, dtype=torch.float16, device=device)
         _y = layerNorm(x)
         return True
@@ -228,20 +228,20 @@ def set_cuda_params():
         dtype = torch.float32
         dtype_vae = torch.float32
         dtype_unet = torch.float32
-    if shared.opts.cuda_dtype == 'BF16' or dtype == torch.bfloat16:
+        fp16_ok = None
+        bf16_ok = None
+    elif shared.opts.cuda_dtype == 'BF16' or dtype == torch.bfloat16:
+        fp16_ok = test_fp16()
         bf16_ok = test_bf16()
         dtype = torch.bfloat16 if bf16_ok else torch.float16
         dtype_vae = torch.bfloat16 if bf16_ok else torch.float16
         dtype_unet = torch.bfloat16 if bf16_ok else torch.float16
-    else:
-        bf16_ok = False
-    if shared.opts.cuda_dtype == 'FP16' or dtype == torch.float16:
+    elif shared.opts.cuda_dtype == 'FP16' or dtype == torch.float16:
         fp16_ok = test_fp16()
+        bf16_ok = None
         dtype = torch.float16 if fp16_ok else torch.float32
         dtype_vae = torch.float16 if fp16_ok else torch.float32
         dtype_unet = torch.float16 if fp16_ok else torch.float32
-    else:
-        fp16_ok = False
     if shared.opts.no_half:
         log.info('Torch override dtype: no-half set')
         dtype = torch.float32
@@ -264,7 +264,14 @@ def set_cuda_params():
 
 args = cmd_args.parser.parse_args()
 backend = 'not set'
-if args.use_ipex or (hasattr(torch, 'xpu') and torch.xpu.is_available()):
+if args.use_openvino:
+    from modules.intel.openvino import get_openvino_device
+    from modules.intel.openvino import get_device as get_raw_openvino_device
+    backend = 'openvino'
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        torch.xpu.is_available = lambda *args, **kwargs: False
+    torch.cuda.is_available = lambda *args, **kwargs: False
+elif args.use_ipex or (hasattr(torch, 'xpu') and torch.xpu.is_available()):
     backend = 'ipex'
     from modules.intel.ipex import ipex_init
     ok, e = ipex_init()
@@ -278,10 +285,6 @@ elif args.use_directml:
     if not ok:
         log.error('DirectML initialization failed: {e}')
         backend = 'cpu'
-elif args.use_openvino:
-    from modules.intel.openvino import get_openvino_device
-    from modules.intel.openvino import get_device as get_raw_openvino_device
-    backend = 'openvino'
 elif torch.cuda.is_available() and torch.version.cuda:
     backend = 'cuda'
 elif torch.cuda.is_available() and torch.version.hip:

@@ -2,6 +2,7 @@ from typing import Union, List
 import os
 import re
 import time
+import concurrent
 import lora_patches
 import network
 import network_lora
@@ -15,7 +16,7 @@ import network_glora
 import lora_convert
 import torch
 import diffusers.models.lora
-from modules import shared, devices, sd_models, sd_models_compile, errors, scripts, sd_hijack
+from modules import shared, devices, sd_models, sd_models_compile, errors, scripts
 
 
 debug = os.environ.get('SD_LORA_DEBUG', None) is not None
@@ -156,8 +157,9 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         list_available_networks()
         networks_on_disk = [available_network_aliases.get(name, None) for name in names]
     failed_to_load_networks = []
+
     recompile_model = False
-    if shared.opts.cuda_compile and shared.opts.cuda_compile_backend == "openvino_fx":
+    if shared.compiled_model_state is not None and shared.compiled_model_state.is_compiled:
         if len(names) == len(shared.compiled_model_state.lora_model):
             for i, name in enumerate(names):
                 if shared.compiled_model_state.lora_model[i] != f"{name}:{te_multipliers[i] if te_multipliers else 1.0}":
@@ -166,17 +168,24 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                     break
             if not recompile_model:
                 if len(loaded_networks) > 0 and debug:
-                    shared.log.debug('OpenVINO: Skipping LoRa loading')
+                    shared.log.debug('Model Compile: Skipping LoRa loading')
                 return
         else:
             recompile_model = True
             shared.compiled_model_state.lora_model = []
     if recompile_model:
-        shared.compiled_model_state.lora_compile = True
+        backup_cuda_compile = shared.opts.cuda_compile
+        backup_nncf_compress_weights = shared.opts.nncf_compress_weights
+        backup_nncf_compress_text_encoder_weights = shared.opts.nncf_compress_text_encoder_weights
         sd_models.unload_model_weights(op='model')
         shared.opts.cuda_compile = False
+        shared.opts.nncf_compress_weights = False
+        shared.opts.nncf_compress_text_encoder_weights = False
         sd_models.reload_model_weights(op='model')
-        shared.opts.cuda_compile = True
+        shared.opts.cuda_compile = backup_cuda_compile
+        shared.opts.nncf_compress_weights = backup_nncf_compress_weights
+        shared.opts.nncf_compress_text_encoder_weights = backup_nncf_compress_text_encoder_weights
+
     loaded_networks.clear()
     for i, (network_on_disk, name) in enumerate(zip(networks_on_disk, names)):
         net = None
@@ -208,8 +217,6 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         net.unet_multiplier = unet_multipliers[i] if unet_multipliers else 1.0
         net.dyn_dim = dyn_dims[i] if dyn_dims else 1.0
         loaded_networks.append(net)
-    if failed_to_load_networks:
-        sd_hijack.model_hijack.comments.append("Networks not found: " + ", ".join(failed_to_load_networks))
 
     while len(lora_cache) > shared.opts.lora_in_memory_limit:
         name = next(iter(lora_cache))
@@ -220,7 +227,9 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
     if recompile_model:
         shared.log.info("LoRA recompiling model")
+        backup_lora_model = shared.compiled_model_state.lora_model
         sd_models_compile.compile_diffusers(shared.sd_model)
+        shared.compiled_model_state.lora_model = backup_lora_model
 
 
 def network_restore_weights_from_backup(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.GroupNorm, torch.nn.LayerNorm, torch.nn.MultiheadAttention, diffusers.models.lora.LoRACompatibleLinear, diffusers.models.lora.LoRACompatibleConv]):
@@ -439,20 +448,26 @@ def list_available_networks():
         shared.log.warning('LoRA directory not found: path="{shared.cmd_opts.lora_dir}"')
     if os.path.exists(shared.cmd_opts.lyco_dir):
         candidates += list(shared.walk_files(shared.cmd_opts.lyco_dir, allowed_extensions=[".pt", ".ckpt", ".safetensors"]))
-    for filename in candidates:
+
+    def add_network(filename):
         if os.path.isdir(filename):
-            continue
+            return
         name = os.path.splitext(os.path.basename(filename))[0]
         try:
             entry = network.NetworkOnDisk(name, filename)
+            available_networks[entry.name] = entry
+            if entry.alias in available_network_aliases:
+                forbidden_network_aliases[entry.alias.lower()] = 1
+            available_network_aliases[entry.name] = entry
+            available_network_aliases[entry.alias] = entry
+            if entry.shorthash:
+                available_network_hash_lookup[entry.shorthash] = entry
         except OSError as e:  # should catch FileNotFoundError and PermissionError etc.
             shared.log.error(f"Failed to load network {name} from {filename} {e}")
-            continue
-        available_networks[name] = entry
-        if entry.alias in available_network_aliases:
-            forbidden_network_aliases[entry.alias.lower()] = 1
-        available_network_aliases[name] = entry
-        available_network_aliases[entry.alias] = entry
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=shared.max_workers) as executor:
+        for fn in candidates:
+            executor.submit(add_network, fn)
 
 
 def infotext_pasted(infotext, params): # pylint: disable=W0613

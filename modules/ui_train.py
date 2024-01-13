@@ -3,12 +3,13 @@ import gradio as gr
 from modules import sd_hijack, script_callbacks, shared
 from modules.ui_components import FormRow
 from modules.ui_common import create_refresh_button
+from modules.ui_sections import create_sampler_inputs
 from modules.call_queue import wrap_gradio_gpu_call
-from modules.textual_inversion import textual_inversion
-import modules.errors
 
 
-def create_ui(txt2img_preview_params):
+def create_ui():
+    from modules.textual_inversion import textual_inversion
+    import modules.hypernetworks.ui
     dummy_component = gr.Label(visible=False)
 
     with gr.Row(elem_id="train_tab"):
@@ -41,8 +42,24 @@ def create_ui(txt2img_preview_params):
                         return gr_show(False), gr_show(True), gr_show(False)
                     elif tab == 'hn':
                         return gr_show(False), gr_show(False), gr_show(True)
-                    else:
+                    elif tab == 'pr':
                         return gr_show(True), gr_show(False), gr_show(False)
+                    else:
+                        return gr_show(False), gr_show(False), gr_show(False)
+
+                ### preview tab
+
+                with gr.Tab(label="Preview settings", id="train_preview_tab") as tab_preview:
+                    tab_preview.select(fn=lambda: train_tab_change('pr'), inputs=[], outputs=[action_pp, action_ti, action_hn])
+                    prompt = gr.Textbox(label="Prompt", value="", placeholder="Prompt to be used for previews", lines=2)
+                    negative = gr.Textbox(label="Negative prompt", value="", placeholder="Negative prompt to be used for previews", lines=2)
+                    steps, sampler_index = create_sampler_inputs('train', accordion=False)
+                    cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label='CFG scale', value=6.0)
+                    seed = gr.Number(label='Initial seed', value=-1)
+                    with gr.Row():
+                        width = gr.Slider(minimum=64, maximum=8192, step=8, label="Width", value=512)
+                        height = gr.Slider(minimum=64, maximum=8192, step=8, label="Height", value=512)
+                    txt2img_preview_params = [prompt, negative, steps, sampler_index, cfg_scale, seed, width, height]
 
                 ### preprocess tab
 
@@ -89,12 +106,13 @@ def create_ui(txt2img_preview_params):
                             process_multicrop_objective = gr.Radio(["Maximize area", "Minimize error"], value="Maximize area", label="Resizing objective")
                             process_multicrop_threshold = gr.Slider(minimum=0, maximum=1, step=0.01, label="Error threshold", value=0.1)
 
+                    from modules.textual_inversion import ui
                     process_split.change(fn=lambda show: gr_show(show), inputs=[process_split], outputs=[process_split_extra_row])
                     process_focal_crop.change(fn=lambda show: gr_show(show), inputs=[process_focal_crop], outputs=[process_focal_crop_row])
                     process_multicrop.change(fn=lambda show: gr_show(show), inputs=[process_multicrop], outputs=[process_multicrop_col])
                     process_stop.click(fn=lambda: shared.state.interrupt(), inputs=[], outputs=[])
                     process_run.click(
-                        fn=wrap_gradio_gpu_call(modules.textual_inversion.ui.preprocess, extra_outputs=[gr.update()]),
+                        fn=wrap_gradio_gpu_call(ui.preprocess, extra_outputs=[gr.update()]),
                         _js="startTrainMonitor",
                         inputs=[
                             dummy_component,

@@ -5,9 +5,6 @@ from typing import Any, Dict, Optional
 
 
 initialized = False
-submodels_sd = ("text_encoder", "unet", "vae_encoder", "vae_decoder",)
-submodels_sdxl = ("text_encoder", "text_encoder_2", "unet", "vae_encoder", "vae_decoder",)
-submodels_sdxl_refiner = ("text_encoder_2", "unet", "vae_encoder", "vae_decoder",)
 
 
 class DynamicSessionOptions(ort.SessionOptions):
@@ -103,9 +100,9 @@ def preprocess_pipeline(p, refiner_enabled: bool):
 
     if "ONNX" not in shared.opts.diffusers_pipeline:
         shared.log.warning(f"Unsupported pipeline for 'olive-ai' compile backend: {shared.opts.diffusers_pipeline}. You should select one of the ONNX pipelines.")
-        return
+        return shared.sd_model
 
-    if shared.opts.cuda_compile and shared.opts.cuda_compile_backend == "olive-ai":
+    if len(shared.opts.cuda_compile) != 0:
         compile_height = p.height
         compile_width = p.width
         if (shared.compiled_model_state is None or
@@ -133,6 +130,8 @@ def preprocess_pipeline(p, refiner_enabled: bool):
         if shared.opts.onnx_unload_base:
             sd_models.reload_model_weights(op='model')
             shared.sd_model = shared.sd_model.preprocess(p)
+
+    return shared.sd_model
 
 
 def initialize():

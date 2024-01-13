@@ -26,6 +26,8 @@ omegaconf
 open-clip-torch
 olive-ai
 optimum
+olive-ai
+optimum
 piexif
 psutil
 pyyaml
@@ -46,6 +48,7 @@ dctorch
 pymatting
 matplotlib
 peft
+orjson
 httpx==0.24.1
 compel==2.0.2
 torchsde==0.2.6
@@ -53,7 +56,7 @@ torchsde==0.2.6
 antlr4-python3-runtime==4.9.3
 requests==2.31.0
 tqdm==4.66.1
-accelerate==0.25.0
+accelerate==0.26.1
 opencv-contrib-python-headless==4.8.1.78
 diffusers==0.25.0
 einops==0.4.1

@@ -1,7 +1,6 @@
 import os
 import copy
 from abc import abstractmethod
-import PIL
 from PIL import Image
 import modules.shared
 from modules import modelloader
@@ -83,26 +82,13 @@ class Upscaler:
         if not os.path.exists(self.user_path):
             return scalers
         self.find_folder(self.user_path, scalers, loaded)
-        """
-        for fn in os.listdir(self.user_path): # from folder
-            if not fn.endswith('.pth') and not fn.endswith('.pt'):
-                continue
-            file_name = os.path.join(self.user_path, fn)
-            if file_name not in loaded:
-                model_name = os.path.splitext(fn)[0]
-                scaler = UpscalerData(name=f'{self.name} {model_name}', path=file_name, upscaler=self)
-                scaler.custom = True
-                scalers.append(scaler)
-                loaded.append(file_name)
-                # modules.shared.log.debug(f'Upscaler type={self.name} folder="{self.user_path}" model="{model_name}" path="{file_name}"')
-        """
         return scalers
 
     @abstractmethod
-    def do_upscale(self, img: PIL.Image, selected_model: str):
+    def do_upscale(self, img: Image, selected_model: str):
         return img
 
-    def upscale(self, img: PIL.Image, scale, selected_model: str = None):
+    def upscale(self, img: Image, scale, selected_model: str = None):
         orig_state = copy.deepcopy(modules.shared.state)
         modules.shared.state.begin('upscale')
         self.scale = scale
@@ -212,7 +198,7 @@ class UpscalerNearest(Upscaler):
 
 def compile_upscaler(model, name=""):
     try:
-        if modules.shared.opts.ipex_optimize_upscaler:
+        if modules.shared.opts.ipex_optimize and "Upscaler" in modules.shared.opts.ipex_optimize:
             import intel_extension_for_pytorch as ipex # pylint: disable=import-error, unused-import
             from modules.devices import dtype as devices_dtype
             model.training = False
@@ -221,7 +207,7 @@ def compile_upscaler(model, name=""):
     except Exception as err:
         modules.shared.log.warning(f"Upscaler IPEX Optimize not supported: {err}")
     try:
-        if modules.shared.opts.cuda_compile_upscaler and modules.shared.opts.cuda_compile_backend != 'none':
+        if "Upscaler" in modules.shared.opts.cuda_compile and modules.shared.opts.cuda_compile_backend != 'none':
             modules.shared.log.info(f"Upscaler Compiling: {name} mode={modules.shared.opts.cuda_compile_backend}")
             import logging
             import torch._dynamo # pylint: disable=unused-import,redefined-outer-name

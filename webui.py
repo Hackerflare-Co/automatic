@@ -11,38 +11,32 @@ from threading import Thread
 import modules.loader
 import torch # pylint: disable=wrong-import-order
 from modules import timer, errors, paths # pylint: disable=unused-import
-local_url = None
-from installer import log, git_commit
+from installer import log, git_commit, custom_excepthook
 import ldm.modules.encoders.modules # pylint: disable=W0611,C0411,E0401
-from modules import shared, extensions, extra_networks, ui_tempdir, ui_extra_networks, modelloader # pylint: disable=ungrouped-imports
+from modules import shared, extensions, ui_tempdir, modelloader # pylint: disable=ungrouped-imports
+from modules import extra_networks, ui_extra_networks # pylint: disable=ungrouped-imports
 from modules.paths import create_paths
 from modules.call_queue import queue_lock, wrap_queued_call, wrap_gradio_gpu_call # pylint: disable=W0611,C0411,C0412
 import modules.devices
-
 import modules.sd_samplers
-import modules.upscaler
-import modules.img2img
 import modules.lowvram
 import modules.scripts
-import modules.sd_hijack
 import modules.sd_models
 import modules.sd_vae
-import modules.txt2img
-import modules.script_callbacks
-import modules.textual_inversion.textual_inversion
 import modules.progress
 import modules.ui
-from modules.shared import cmd_opts, opts
+import modules.txt2img
+import modules.img2img
+import modules.upscaler
+import modules.textual_inversion.textual_inversion
 import modules.hypernetworks.hypernetwork
+import modules.script_callbacks
 from modules.middleware import setup_middleware
+from modules.shared import cmd_opts, opts
 
 
-try:
-    from installer import custom_excepthook # pylint: disable=ungrouped-imports
-    sys.excepthook = custom_excepthook
-except Exception:
-    pass
-
+sys.excepthook = custom_excepthook
+local_url = None
 state = shared.state
 backend = shared.backend
 if not modules.loader.initialized:
@@ -51,7 +45,6 @@ if cmd_opts.server_name:
     server_name = cmd_opts.server_name
 else:
     server_name = "0.0.0.0" if cmd_opts.listen else None
-
 fastapi_args = {
     "version": f'0.0.{git_commit}',
     "title": "SD.Next",
@@ -64,6 +57,10 @@ fastapi_args = {
         "deepLinking": False,
     }
 }
+
+import modules.sd_hijack
+timer.startup.record("ldm")
+
 modules.loader.initialized = True
 
 
@@ -115,7 +112,6 @@ def initialize():
 
     shared.opts.onchange("sd_vae", wrap_queued_call(lambda: modules.sd_vae.reload_vae_weights()), call=False)
     shared.opts.onchange("temp_dir", ui_tempdir.on_tmpdir_changed)
-    # shared.opts.onchange("gradio_theme", shared.reload_gradio_theme)
     timer.startup.record("onchange")
 
     modules.textual_inversion.textual_inversion.list_textual_inversion_templates()
@@ -155,7 +151,9 @@ def initialize():
 
 
 def load_model():
-    if opts.sd_checkpoint_autoload and (shared.cmd_opts.ckpt is not None and shared.cmd_opts.ckpt.lower() != 'none'):
+    if not opts.sd_checkpoint_autoload or (shared.cmd_opts.ckpt is not None and shared.cmd_opts.ckpt.lower() != 'none'):
+        log.debug('Model auto load disabled')
+    else:
         shared.state.begin('load')
         thread_model = Thread(target=lambda: shared.sd_model)
         thread_model.start()
@@ -164,8 +162,6 @@ def load_model():
         shared.state.end()
         thread_model.join()
         thread_refiner.join()
-    else:
-        log.debug('Model auto load disabled')
     shared.opts.onchange("sd_model_checkpoint", wrap_queued_call(lambda: modules.sd_models.reload_model_weights(op='model')), call=False)
     shared.opts.onchange("sd_model_refiner", wrap_queued_call(lambda: modules.sd_models.reload_model_weights(op='refiner')), call=False)
     shared.opts.onchange("sd_model_dict", wrap_queued_call(lambda: modules.sd_models.reload_model_weights(op='dict')), call=False)
@@ -266,7 +262,7 @@ def start_ui():
             favicon_path='html/logo.ico',
             allowed_paths=[os.path.dirname(__file__), cmd_opts.data_dir],
             app_kwargs=fastapi_args,
-            _frontend=not cmd_opts.share,
+            _frontend=True and cmd_opts.share,
         )
     if cmd_opts.data_dir is not None:
         ui_tempdir.register_tmp_file(shared.demo, os.path.join(cmd_opts.data_dir, 'x'))
@@ -318,13 +314,13 @@ def webui(restart=False):
     log.info(f"Startup time: {timer.startup.summary()}")
     debug = log.trace if os.environ.get('SD_SCRIPT_DEBUG', None) is not None else lambda *args, **kwargs: None
     debug('Trace: SCRIPTS')
-    debug('Loaded scripts:')
     for m in modules.scripts.scripts_data:
         debug(f'  {m}')
     debug('Loaded postprocessing scripts:')
     for m in modules.scripts.postprocessing_scripts_data:
         debug(f'  {m}')
     timer.startup.reset()
+    modules.script_callbacks.print_timers()
 
     if not restart:
         # override all loggers to use the same handlers as the main logger

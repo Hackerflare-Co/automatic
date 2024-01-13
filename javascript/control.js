@@ -1,4 +1,16 @@
-function setupControlUI() {
+function controlInputMode(inputMode, ...args) {
+  const tab = gradioApp().querySelector('#control-tab-input button.selected');
+  if (!tab) return ['Select', ...args];
+  inputMode = tab.innerText;
+  if (inputMode === 'Image') {
+    if (!gradioApp().getElementById('control_input_select').classList.contains('hidden')) inputMode = 'Select';
+    else if (!gradioApp().getElementById('control_input_resize').classList.contains('hidden')) inputMode = 'Outpaint';
+    else if (!gradioApp().getElementById('control_input_inpaint').classList.contains('hidden')) inputMode = 'Inpaint';
+  }
+  return [inputMode, ...args];
+}
+
+async function setupControlUI() {
   const tabs = ['input', 'output', 'preview'];
   for (const tab of tabs) {
     const btn = gradioApp().getElementById(`control-${tab}-button`);
