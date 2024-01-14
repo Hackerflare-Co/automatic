@@ -368,7 +368,7 @@ def create_ui(startup_timer = None):
     interfaces += [(interrogate_interface, "Interrogate", "interrogate")]
     interfaces += [(train_interface, "Train", "train")]
     interfaces += [(models_interface, "Models", "models")]
-    if "ONNX" in shared.opts.diffusers_pipeline:
+    if shared.opts.onnx_show_menu:
         with gr.Blocks(analytics_enabled=False) as onnx_interface:
             if shared.backend == shared.Backend.DIFFUSERS:
                 from modules import ui_onnx
